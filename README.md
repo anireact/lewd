@@ -50,14 +50,21 @@ especially the [Limitations](#limitations) and
         -   [Method wrappers](#method-wrappers)
         -   [State accessor](#state-sccessor)
 -   [API](#api)
-    -   [`alloc()`](#alloci32weakkeyi32)
-    -   [`trim()`](#trimvoid)
-    -   [`bind()`](#bindtfnfnt)
-    -   [`watch()`](#watchfnweakkeyvoid)
-    -   [`mem`](#memwebassemblymemory)
-    -   [`buf`](#bufarraybuffer)
-    -   [`i32`](#i32int32array)
-    -   [`cap`](#capi32)
+    -   [Primary API](#primary-api)
+        -   [`alloc()`](#alloci32weakkeyi32)
+        -   [`trim()`](#trimvoid)
+        -   [`bind()`](#bindtfnfnt)
+        -   [`watch()`](#watchfnweakkeyvoid)
+        -   [`memory`](#memorywebassemblymemory)
+        -   [`buffer`](#bufferarraybuffer)
+    -   [Stats API](#stats-api)
+        -   [`total()`](#totalf64)
+        -   [`used()`](#usedf64)
+        -   [`usedRun()`](#usedrunf64)
+        -   [`free()`](#freef64)
+        -   [`headFree()`](#headfreef64)
+        -   [`tailFree()`](#tailfreef64)
+        -   [`largestFree()`](#largestfreef64)
 -   [TODO](#todo)
 -   [Support](#support)
 -   [License](#license)
@@ -164,7 +171,7 @@ First, we import everything we’ll need later, and re-export the
 [`trim()`](#trimvoid) function:
 
 ```typescript
-import { alloc, trim, bind, watch, mem, buf, cap } from '@anireact/lewd';
+import { alloc, trim, bind, watch, memory, buffer, cap } from '@anireact/lewd';
 
 export { trim };
 ```
@@ -245,7 +252,7 @@ and its result is returned as it is:
 ```typescript
 // Spawn an instance and provide its imports:
 let impl = new WebAssembly.Instance(PRNG_MOD, {
-    env: { mem, tab },
+    env: { memory, tab },
 });
 
 // Invoke the initialization procedure:
@@ -255,8 +262,8 @@ return impl;
 ```
 
 First, we create a `WebAssembly.Instance` object and provide its imports. In our
-case, it’s the memory object `mem`, imported as `env.mem`,s and the precomputed
-tables location imported as `env.tab`.
+case, it’s the memory object `memory`, imported as `env.memory`,s and the
+precomputed tables location imported as `env.tab`.
 
 Then we call the `init()` procedure to precompute the tables and store the
 result at the `tab` address.
@@ -281,7 +288,7 @@ is quite trivial:
 
 // Respawn the instance:
 impl = new WebAssembly.Instance(PRNG_MOD, {
-    env: { mem, tab },
+    env: { memory, tab },
 });
 
 // -> Restore code goes here <-
@@ -314,10 +321,10 @@ The boilerplate is finished, and now we can write a wrapper class for our PRNG:
 ```typescript
 export class MyPRNG {
     // PRNG instance address:
-    #ptr: number;
+    #addr: number;
 
     // PRNG instance memory view:
-    #buf: Int32Array;
+    #view: Int32Array;
 
     // The constructor and initializer:
     constructor(seed: number);
@@ -331,7 +338,7 @@ export class MyPRNG {
 }
 ```
 
-The class has the `#ptr` field to hold the address of the PRNG and the `#buf`
+The class has the `#addr` field to hold the address of the PRNG and the `#view`
 field for the memory view into the allocated space.
 
 #### The constructor
@@ -346,18 +353,18 @@ class MyPRNG {
         seed = seed | 0;
 
         // Allocate:
-        this.#ptr = alloc(16, this) | 0;
+        this.#addr = alloc(16, this) | 0;
 
         // Create the memory view:
-        this.#buf = new Int32Array(buf, this.#ptr >>> 0, 4);
+        this.#view = new Int32Array(buffer, this.#addr >>> 0, 4);
 
         // Register the memory resize handler:
         watch(() => {
-            this.#buf = new Int32Array(buf, this.#ptr >>> 0, 4);
+            this.#view = new Int32Array(buffer, this.#addr >>> 0, 4);
         }, this);
 
         // Call the WASM-side constructor:
-        impl.seed(this.#ptr | 0, seed | 0);
+        impl.seed(this.#addr | 0, seed | 0);
     }
 }
 ```
@@ -392,7 +399,7 @@ Now let’s write the method wrappers:
 ```typescript
 class MyPRNG {
     rand = () => {
-        return impl.rand(this.#ptr) | 0;
+        return impl.rand(this.#addr) | 0;
     };
 
     fill = (out: Int32Array) => {
@@ -400,10 +407,10 @@ class MyPRNG {
         let scratch = alloc(out.byteLength | 0) | 0;
 
         // Call the buffer fill method:
-        impl.fill(this.#ptr | 0, scratch | 0, out.byteLength | 0);
+        impl.fill(this.#addr | 0, scratch | 0, out.byteLength | 0);
 
         // Copy the scratch into the JS-side buffer:
-        out.set(new Int32Array(buf, scratch >>> 0, out.length));
+        out.set(new Int32Array(buffer, scratch >>> 0, out.length));
 
         // Release unused memory back to the host/OS:
         trim();
@@ -439,20 +446,22 @@ write an accessor for its internal state:
 ```typescript
 class MyPRNG {
     get state() {
-        return [...this.#buf];
+        return [...this.#view];
     }
     set state(state: number[]) {
-        this.#buf.set([state[0]!, state[1]!, state[2]!, state[3]!]);
+        this.#view.set([state[0]!, state[1]!, state[2]!, state[3]!]);
     }
 }
 ```
 
-Nothing interesting, we just wrap the `#buf` view we’ve configured in the
+Nothing interesting, we just wrap the `#view` we’ve configured in the
 constructor.
 
 ## API
 
-### `alloc(i32,WeakKey?):i32`
+### Primary API
+
+#### `alloc(i32,WeakKey?):i32`
 
 ```typescript
 function alloc(size: i32): i32;
@@ -473,19 +482,19 @@ returned. This can save some CPU cycles by skipping the underlying bookkeeping,
 but should be used carefully to avoid any allocations while the scratch memory
 is still in use.
 
-### `trim():void`
+#### `trim():void`
 
 ```typescript
 function trim(): void;
 ```
 
-Releases unused memory pages at the end of memory back to the host/OS.
+Releases unused memory pages in the end of memory back to the host/OS.
 
 Internally, it creates a trimmed copy of memory, copies the data into it, and
 then triggers the memory shrink handlers defined as the respawn callbacks of the
 [`bind()`](#bindtfnfnt) function. Can cause OOM, if the host is short on RAM.
 
-### `bind<t>(fn,fn):t`
+#### `bind<t>(fn,fn):t`
 
 ```typescript
 function bind<t>(initial: () => t, respawn: () => unknown): t;
@@ -500,14 +509,15 @@ function bind<t>(initial: () => t, respawn: () => unknown): t;
 Registers a memory shrink handler `respawn`, immediately invokes the `spawn`
 callback, and returns its result.
 
-**Notes:**
+> **NB:**
+>
+> -   If a WASM module has mutable globals, tables, etc., don’t forget to
+>     capture and restore them on respawn.
+> -   If a module has a global initialization procedure, don’t call it on
+>     respawn; instead, capture and restore the _initialized_ state (other than
+>     memory).
 
--   If a WASM module has mutable globals, tables, etc., don’t forget to capture
-    and restore them on respawn.
--   If a module has a global initialization procedure, don’t call it on respawn;
-    instead, capture and restore the _initialized_ state (other than memory).
-
-### `watch(fn,WeakKey):void`
+#### `watch(fn,WeakKey):void`
 
 ```typescript
 function watch(watcher: () => unknown, token: WeakKey): void;
@@ -518,21 +528,79 @@ function watch(watcher: () => unknown, token: WeakKey): void;
 
 Registers a memory resize handler. Can be used to refresh memory views.
 
-### `mem:WebAssembly.Memory`
+#### `memory:WebAssembly.Memory`
 
 The active memory object.
 
-### `buf:ArrayBuffer`
+#### `buffer:ArrayBuffer`
 
 The active buffer object.
 
-### `i32:Int32Array`
+### Stats API
 
-The active signed 32-bit integer view.
+> **NB:**
+>
+> All functions here return values as 64-bit floating point numbers, not
+> integers.
 
-### `cap:i32`
+#### `total():f64`
 
-The active memory size _in 16-byte blocks_.
+```typescript
+function total(): f64;
+```
+
+Returns the total memory size.
+
+#### `used():i32`
+
+```typescript
+function used(): f64;
+```
+
+Returns the total allocated memory amount.
+
+#### `usedRun():i32`
+
+```typescript
+function usedRun(): f64;
+```
+
+Returns the total used memory span size including free gaps between allocated
+chunks.
+
+#### `free():f64`
+
+```typescript
+function free(): f64;
+```
+
+Returns the total free memory amount.
+
+#### `headFree():f64`
+
+```typescript
+function headFree(): f64;
+```
+
+Returns the amount of free memory in the beginning of memory. Calculated
+independently of [`tailFree`](#tailfreef64).
+
+#### `tailFree():f64`
+
+```typescript
+function tailFree(): f64;
+```
+
+Returns the amount of free memory in the end of memory. Calculated independently
+of [`headFree`](#headfreef64).
+
+#### `largestFree():f64`
+
+```typescript
+function largestFree(): f64;
+```
+
+Returns the largest free chunk size, in 16-byte blocks.
 
 ## TODO
 
@@ -549,7 +617,6 @@ The active memory size _in 16-byte blocks_.
 -   [ ] Pointer kind conversion (strong to weak and vice versa).
 -   [ ] OOM handling.
 -   [ ] Explicit unregistering of resize handlers.
--   [ ] Memory usage API.
 -   [ ] Debugging API.
 -   [ ] Configurable limits.
 -   [ ] Relocatable pointers.

@@ -245,7 +245,7 @@ const unlink = (self: Zone): void => {
 };
 
 /**
- * Compute the full byte length of a zone.
+ * Compute the full zone length in 16-byte blocks.
  *
  * @param self The target zone.
  */ // prettier-ignore
@@ -299,7 +299,7 @@ const alloc = (size: number, token?: WeakKey): number => {
     var free: null | Zone = null;
     var used: null | Zone = null;
 
-    // Align and shift the size:
+    // ↓ 1. Align and shift the size:
     size = (size + (-size & $.Align16) | 0) >>> 4 | 0;
 
     // ↓ a) Find an existing free zone:
@@ -337,24 +337,27 @@ const alloc = (size: number, token?: WeakKey): number => {
     else {
         // ↓ a) The last zone is free:
         if (last.f) {
-            temp = size - (measure(last) | 0) | 0;            // ← 1. Compute the number of 16-byte blocks to grow the memory by.
-            del(last);                                        // ← 2. Temporarily delete the last zone from the tree.
-            mem.grow(temp + (-temp & $.Align64K) >>> 12) | 0; // ← 3. Grow the memory.
-            add(last);                                        // ← 4. Add the last zone back to the tree.
+            temp = size - (measure(last) | 0) | 0;               // ← 1. Compute the number of 16-byte blocks to grow the memory by.
+            del(last);                                           // ← 2. Temporarily delete the last zone from the tree.
+            memory.grow(temp + (-temp & $.Align64K) >>> 12) | 0; // ← 3. Grow the memory.
+            add(last);                                           // ← 4. Add the last zone back to the tree.
         }
 
         // ↓ b) The last zone is used:
         else {
-            mem.grow(size + (-size & $.Align64K) >>> 12) | 0; // ← 1. Grow the memory.
-            Free(cap, last, null);                            // ← 2. Create and link new free zone.
+            memory.grow(size + (-size & $.Align64K) >>> 12) | 0; // ← 1. Grow the memory.
+            Free(cap, last, null);                               // ← 2. Create and link new free zone.
         }
 
         // ↓ c) Finally:
 
-        /*#__NOINLINE__*/ rebind();                           // ← 1. Update bindings after resize.
-        /*#__NOINLINE__*/ notify();                           // ← 2. Notify resize listeners.
-        free = last;                                          // ← 3. Use the last zone.
+        /*#__NOINLINE__*/ rebind();                              // ← 1. Update bindings after resize.
+        /*#__NOINLINE__*/ notify();                              // ← 2. Notify resize listeners.
+        free = last;                                             // ← 3. Use the last zone.
     }
+
+    // ↓ c) Actually allocate:
+    //   ---------------------
 
     // ↓ Lifetime token is specified:
     if (token) {
@@ -365,13 +368,14 @@ const alloc = (size: number, token?: WeakKey): number => {
         else                     unlink(free); // ← 5. If it’s now too small, remove it from the list.
 
         preg.register(token, used);            // ← 6. Register the finalizer.
+        allocd = allocd + size | 0;            // ← 7. Track memory usage:
     }
 
     return free.a << 4 | 0;
 };
 
 /**
- * Releases unused memory pages at the end of memory back to the host/OS.
+ * Releases unused memory pages in the end of memory back to the host/OS.
  *
  * Internally, it creates a trimmed copy of memory, copies the data into it, and
  * then triggers the memory shrink handlers defined as the respawn callbacks of
@@ -385,17 +389,21 @@ const trim = (): void => {
     /** Current memory data.   */ var old: null | Int32Array = null;
     /** Memory shrink handler. */ var app: null | Func       = null;
 
-    size = last.a | 0;                      // ←  1. Get the last zone size.
-    size = size + (-size & $.Align64K) | 0; // ←  2. Align to 64 KiB.
-    if (!size) size = 0x1000;               // ←  3. Preserve at least one page.
-    if (size >>> 0 >= cap >>> 0) return;    // ←  4. Nothing to release.
+    // ↓ 1. Calculate the memory amount to release:
+    size = last.a | 0;                                // ← 1. Get the last zone size.
+    size = size + (-size & $.Align64K) | 0;           // ← 2. Align to 64 KiB.
+    if (!size) size = 0x1000;                         // ← 3. Preserve at least one page.
+    if (size >>> 0 >= cap >>> 0) return;              // ← 4. Nothing to release.
 
-    old = i32.subarray(0, size << 2 >>> 0); // ←  5. Capture the current data.
-    mem = Memory(size >>> 12);              // ←  6. Spawn new memory.
-    /*#__NOINLINE__*/ rebind();             // ←  7. Update bindings after resize.
-    i32.set(old);                           // ←  8. Copy the data.
-    for (app of apps) app();                // ←  9. Notify shrink listeners.
-    /*#__NOINLINE__*/ notify();             // ← 10. Notify resize listeners.
+    // ↓ 2. Respawn and migrate the memory:
+    old = new Int32Array(buffer, 0, size << 2 >>> 0); // ← 1. Capture the current data.
+    memory = Memory(size >>> 12);                     // ← 2. Spawn new memory.
+    /*#__NOINLINE__*/ rebind();                       // ← 3. Update bindings after resize.
+    new Int32Array(buffer).set(old);                  // ← 4. Copy the data.
+
+    // ↓ 3. Notify listeners:
+    for (app of apps) app();                          // ← 1. Notify shrink listeners.
+    /*#__NOINLINE__*/ notify();                       // ← 2. Notify resize listeners.
 };
 
 /**
@@ -404,11 +412,10 @@ const trim = (): void => {
 const rebind = () => {
     var len = 0.0;
 
-    buf = mem.buffer;                                // ← 1. Update the active buffer.
-    len = +buf.byteLength;                           // ← 2. Get the buffer size in bytes.
-    i32 = new Int32Array(buf);                       // ← 3. Update primary view.
-    if (+len == +4294967296.0) cap = 0x10000000;     // ← 4. Special-case the 4 GiB capacity.
-    else                       cap = (~~+len >>> 4); // ← 5. Update the buffer size.
+    buffer = memory.buffer;                          // ← 1. Update the active buffer.
+    len = +buffer.byteLength;                        // ← 2. Get the buffer size in bytes.
+    if (+len == +4294967296.0) cap = 0x10000000;     // ← 3. Special-case the 4 GiB capacity.
+    else                       cap = (~~+len >>> 4); // ← 4. Update the buffer size.
 };
 // #endregion Memory management
 
@@ -472,15 +479,96 @@ const reset = (): void => {
     apps = new Set();
     wset = new Set();
     wmap = new WeakMap();
-    mem = Memory(1);
-    buf = mem.buffer;
-    i32 = new Int32Array(buf);
+    memory = Memory(1);
+    buffer = memory.buffer;
     cap = 0x1000;
+    allocd = 0;
     head = { f: 1, a: 0, p: null, n: null };
     last = head;
     root = { z: head, h: 1, l: null, r: null };
 };
 // #endregion Testing helpers
+
+// #region Usage stats
+/**
+ * Convert 16-byte blocks count to bytes.
+ */
+const bytes = (x: number) => {
+    x = x | 0;
+    return +(+(x >>> 0) * 16.0);
+};
+
+/**
+ * Total memory size.
+ */ // prettier-ignore
+const total = (): number => {
+    return +bytes(cap);
+};
+
+/**
+ * Total allocated memory amount.
+ */ // prettier-ignore
+const used = (): number => {
+    return +bytes(allocd);
+};
+
+/**
+ * Total used memory span size including free gaps between allocated chunks.
+ */ // prettier-ignore
+const usedRun = (): number => {
+    var z = 0;
+
+    z = cap;
+
+    if (head.f)                            z = z - (measure(head) | 0) | 0;
+    if (last.f & ((head !== last) as any)) z = z - (measure(last) | 0) | 0;
+
+    return +bytes(z);
+};
+
+/**
+ * Total free memory amount.
+ */ // prettier-ignore
+const free = (): number => {
+    return +bytes(cap - allocd | 0);
+};
+
+/**
+ * Amount of free memory in the beginning of memory. Calculated independently
+ * of {@linkcode tailFree}.
+ */ // prettier-ignore
+const headFree = (): number => {
+    if (head.f) return +bytes(measure(head) | 0);
+    else        return +0.0;
+};
+
+/**
+ * Amount of free memory in the end of memory. Calculated independently
+ * of {@linkcode headFree}.
+ */ // prettier-ignore
+const tailFree = (): number => {
+    if (last.f) return +bytes(measure(last) | 0);
+    else        return +0.0;
+};
+
+/**
+ * Largest free chunk size.
+ */ // prettier-ignore
+const largestFree = (): number => {
+    var node: null | Node = null;
+    var last: null | Node = null;
+
+    node = root;
+
+    while (node) {
+        last = node;
+        node = node.r;
+    }
+
+    if (last) return +bytes(measure(last.z) | 0);
+    else      return +0.0;
+};
+// #endregion Usage stats
 
 // #region GC handlers
 /**
@@ -489,6 +577,9 @@ const reset = (): void => {
 const preg = /*#__PURE__*/ new FinalizationRegistry<Zone>(zone => {
     if (zone.f) return;
     zone.f = 1;
+
+    // ↓ 1. Track memory usage:
+    allocd = allocd - (measure(zone) | 0) | 0;
 
     // ↓ a) Both adjacent zones are free:
     if (zone.p?.f! & zone.n?.f!) {
@@ -535,11 +626,14 @@ const wreg = /*#__PURE__*/ new FinalizationRegistry<WeakRef<WeakKey>>(ref => {
 // #endregion Subscriber registries
 
 // #region The memory etc.
-/** The active memory object.                 */ var mem: WebAssembly.Memory /* */ = /*#__PURE__*/ Memory(1);
-/** The active buffer object.                 */ var buf: ArrayBuffer /*        */ = /*#__PURE__*/ (() => mem.buffer)();
-/** The active signed 32-bit integer view.    */ var i32: Int32Array /*         */ = /*#__PURE__*/ new Int32Array(buf);
-/** The active memory size in 16-byte blocks. */ var cap: number /*             */ = 0x1000;
+/** The active memory object. */ var memory: WebAssembly.Memory /* */ = /*#__PURE__*/ Memory(1);
+/** The active buffer object. */ var buffer: ArrayBuffer /*        */ = /*#__PURE__*/ (() => memory.buffer)();
 // #endregion The memory etc.
+
+// #region Usage stats
+/** Total memory size, in 16-byte blocks.                                   */ var cap: /*    */ number = 0x1000;
+/** Total used memory, in 16-byte blocks.                                   */ var allocd: /* */ number = 0;
+// #endregion Usage stats
 
 // #region Data structures
 /** Chunk list head.  */ var head: Zone /*        */ = { f: 1, a: 0, p: null, n: null };
@@ -547,8 +641,11 @@ const wreg = /*#__PURE__*/ new FinalizationRegistry<WeakRef<WeakKey>>(ref => {
 /** Search tree root. */ var root: null | Node /* */ = { z: head, h: 1, l: null, r: null };
 // #endregion Data structures
 
-// Public exports
-export { alloc, trim, bind, watch, mem, buf, i32, cap };
+// Primary API:
+export { alloc, trim, bind, watch, memory, buffer };
 
-// Private exports
+// Stats API:
+export { total, used, usedRun, free, headFree, tailFree, largestFree };
+
+// Private API:
 export { bool, Func, Node, Zone, Free, add, del, unlink, measure, lt, reset, apps, wset, wmap, head, last, root };
