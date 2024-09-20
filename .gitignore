@@ -1,0 +1,6 @@
+/.vscode/
+/.yarn/
+/node_modules/
+
+/play/
+/dist/

@@ -1,0 +1,14 @@
+{
+    "extends": "@anireact/typescript-config",
+    "include": ["./**/*"],
+    "exclude": ["./tsconfig.json"],
+    "compilerOptions": {
+        "rootDir": "./",
+        "outDir": "../.yarn/temp/test/",
+        "tsBuildInfoFile": "../.yarn/temp/tsc/tsbuildinfo-core-test.json",
+        "inlineSources": false,
+        "isolatedDeclarations": false,
+        "lib": ["esnext", "dom"]
+    },
+    "references": [{ "path": "../impl/" }]
+}

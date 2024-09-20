@@ -1,0 +1,12 @@
+{
+    "extends": "@anireact/typescript-config",
+    "include": ["./**/*"],
+    "exclude": ["./tsconfig.json"],
+    "compilerOptions": {
+        "noFallthroughCasesInSwitch": false,
+        "rootDir": "./",
+        "outDir": "../dist/",
+        "tsBuildInfoFile": "../.yarn/temp/tsc/tsbuildinfo-core-impl.json",
+        "lib": ["esnext", "dom"]
+    }
+}

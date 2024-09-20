@@ -1,0 +1,9 @@
+/.vscode/
+/.yarn/
+/play/
+/test/
+
+tsconfig.json
+jest.config.mjs
+prettier.config.mjs
+.editorconfig
