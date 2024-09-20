@@ -3,11 +3,11 @@
 Lightweight Efficient WASM-first Dynamic Allocator — a simple and compact
 JS-side allocator for hand-written WASM.
 
-<center>
+<div align="center">
 
 ![LEWD Alloc](./Alloc.png)
 
-</center>
+</div>
 
 ```bash
 yarn add @anireact/lewd
