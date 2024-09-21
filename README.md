@@ -371,7 +371,7 @@ class MyPRNG {
 }
 ```
 
-First, we type-hint the argument to improve performance in some engines. The
+First, we type-hint the argument to improve the performance in some engines. The
 constructor can be pretty hot in some scenarios, so we should not ignore
 optimization opportunities here.
 
