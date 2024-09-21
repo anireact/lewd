@@ -55,35 +55,29 @@ namespace Resize {
     }
 }
 
-/** Weak key type. */
-type Key = WeakKey;
-
-/** Untyped weak reference type. */
-type Ref = WeakRef<Key>;
-
 /** Event hub record type. */
 interface Rec<t> {
-    /** Token weak reference. */ ref: Ref;
+    /** Token weak reference. */ ref: WeakRef<WeakKey>;
     /** Handlers set.         */ set: Set<Func<t>>;
 }
 
 /** Event hub finalization context. */
 interface Context {
-    /** Token weak reference to finalize. */ ref: Ref;
+    /** Token weak reference to finalize. */ ref: WeakRef<WeakKey>;
     /** The event hub to finalize.        */ hub: Hub<any>;
 }
 
 /** Weak event emitter. */
 class Hub<t> {
-    /** The main weak map. */ m = new WeakMap<Key, Rec<t>>();
-    /** The index set.     */ s = new Set<Ref>();
+    /** The main weak map. */ m = new WeakMap<WeakKey, Rec<t>>();
+    /** The index set.     */ s = new Set<WeakRef<WeakKey>>();
 
     /**
      * Register a listener {@linkcode fn} for the lifetime token {@linkcode key}.
      */ // prettier-ignore
-    on = (key: Key, fn: Func<t>): void => {
+    on = (key: WeakKey, fn: Func<t>): void => {
         /** Active hub record.     */ var rec: null | Rec<t> = null;
-        /** Active weak reference. */ var ref: null | Ref    = null;
+        /** Active weak reference. */ var ref: null | WeakRef<WeakKey>    = null;
 
         // ↓ 1. Get the record:
         rec = this.m.get(key) ?? null;
@@ -109,7 +103,7 @@ class Hub<t> {
     /**
      * Unregister a listener {@linkcode fn} or all listeners of the given token {@linkcode key}.
      */ // prettier-ignore
-    off = (key: Key, fn?: Func<t>): void => {
+    off = (key: WeakKey, fn?: Func<t>): void => {
         /** Active hub record. */ var rec: null | Rec<t> = null;
 
         rec = this.m.get(key) ?? null; // ← 1. Get the record.
@@ -130,8 +124,8 @@ class Hub<t> {
      * Trigger the event with the given {@linkcode payload}.
      */ // prettier-ignore
     run = (payload: t): void => {
-        /** Current weak reference.   */ var ref: null | Ref    = null;
-        /** Current referenced value. */ var key: null | Key    = null;
+        /** Current weak reference.   */ var ref: null | WeakRef<WeakKey>    = null;
+        /** Current referenced value. */ var key: null | WeakKey    = null;
         /** Current hub record.       */ var rec: null | Rec<t> = null;
 
         // ↓ Iter over the wek references set:
@@ -416,7 +410,7 @@ const lt = (a: Zone, b: Zone): bool => {
  * @param size  The number of bytes to allocate.
  * @param token The lifetime token.
  */ /*#__NO_SIDE_EFFECTS__*/ // prettier-ignore
-const alloc = (size: number, token?: Key): number => {
+const alloc = (size: number, token?: WeakKey): number => {
     size = size | 0;
 
     var node: null | Node = null;
@@ -768,7 +762,7 @@ const on: {
      * @param token The handler’s lifetime token.
      * @param fn    The handler function.
      */
-    (type: 'resize', token: Key, fn: (_: Resize) => any): void;
+    (type: 'resize', token: WeakKey, fn: (_: Resize) => any): void;
 
     /**
      * Register a `'grow'` event handler. The handler is automatically
@@ -779,7 +773,7 @@ const on: {
      * @param token The handler’s lifetime token.
      * @param fn    The handler function.
      */
-    (type: 'grow', token: Key, fn: (_: Grow) => any): void;
+    (type: 'grow', token: WeakKey, fn: (_: Grow) => any): void;
 
     /**
      * Register a `'trim'` event handler. The handler is automatically
@@ -790,8 +784,8 @@ const on: {
      * @param token The handler’s lifetime token.
      * @param fn    The handler function.
      */
-    (type: 'trim', token: Key, fn: (_: Trim) => any): void;
-} = (type: string, token: Key, fn: (_: any) => any) => {
+    (type: 'trim', token: WeakKey, fn: (_: Trim) => any): void;
+} = (type: string, token: WeakKey, fn: (_: any) => any) => {
     hub[type]?.on(token, fn);
 };
 
@@ -812,7 +806,7 @@ const off: {
      * @param token The handler’s lifetime token.
      * @param fn    The handler function.
      */
-    (type: 'resize', token: Key, fn?: (_: Resize) => any): void;
+    (type: 'resize', token: WeakKey, fn?: (_: Resize) => any): void;
 
     /**
      * Explicitly unregister a `'grow'` handler. If no handler specified, all
@@ -822,7 +816,7 @@ const off: {
      * @param token The handler’s lifetime token.
      * @param fn    The handler function.
      */
-    (type: 'grow', token: Key, fn?: (_: Grow) => any): void;
+    (type: 'grow', token: WeakKey, fn?: (_: Grow) => any): void;
 
     /**
      * Explicitly unregister a `'trim'` handler. If no handler specified, all
@@ -832,8 +826,8 @@ const off: {
      * @param token The handler’s lifetime token.
      * @param fn    The handler function.
      */
-    (type: 'trim', token: Key, fn?: (_: Trim) => any): void;
-} = (type: string, token: Key, fn?: (_: any) => any) => {
+    (type: 'trim', token: WeakKey, fn?: (_: Trim) => any): void;
+} = (type: string, token: WeakKey, fn?: (_: any) => any) => {
     hub[type]?.off(token, fn);
 };
 
@@ -898,7 +892,7 @@ const hub: Record<string, Hub<any>> = {
 // #endregion Data structures
 
 // Primary API:
-export { Key, alloc, trim, bind, memory, buffer };
+export { alloc, trim, bind, memory, buffer };
 
 // Stats API:
 export { total, used, usedRun, free, headFree, tailFree, largestFree };
