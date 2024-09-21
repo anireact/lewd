@@ -57,8 +57,8 @@ especially the [Limitations](#limitations) and
         -   [`memory`](#memorywebassemblymemory)
         -   [`buffer`](#bufferarraybuffer)
     -   [Events API](#events-api)
-        -   [`on()`](#onsignalweakkeyfnvoid)
-        -   [`off()`](#offsignalweakkeyfnvoid)
+        -   [`on()`](#onstringweakkeyfnvoid)
+        -   [`off()`](#offstringweakkeyfnvoid)
     -   [Stats API](#stats-api)
         -   [`total()`](#totalf64)
         -   [`used()`](#usedf64)
@@ -383,7 +383,7 @@ memory leaks, because the allocator does everything for us automatically. And
 just like the `seed` argument, the call is type-hinted.
 
 Now we create an initial view into the allocated memory and register a handler
-to update it on memory resize with the [`on()`](#onsignalweakkeyfnvoid) function
+to update it on memory resize with the [`on()`](#onstringweakkeyfnvoid) function
 call. Just like the pointer, the handler is automatically unregistered when
 `this` is garbage-collected by the host. The important thing here is to cast the
 pointer to an unsigned integer with the `>>> 0` hint in the `Int32Array` calls,
