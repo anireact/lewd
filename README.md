@@ -361,7 +361,7 @@ class MyPRNG {
         this.#view = new Int32Array(buffer, this.#addr >>> 0, 4);
 
         // Register the memory resize handler:
-        on(Signal.Resize, this, () => {
+        on('resize', this, () => {
             this.#view = new Int32Array(buffer, this.#addr >>> 0, 4);
         });
 
@@ -529,7 +529,7 @@ The active buffer object.
 
 ### Events API
 
-#### `on(Signal,WeakKey,fn):void`
+#### `on(string,WeakKey,fn):void`
 
 ```typescript
 function on(type: 'resize', token: WeakKey, fn: (_: Resize) => any): void;
@@ -537,7 +537,7 @@ function on(type: 'grow', token: WeakKey, fn: (_: Grow) => any): void;
 function on(type: 'trim', token: WeakKey, fn: (_: Trim) => any): void;
 ```
 
--   **`type`:** `Signal` — The event type.
+-   **`type`:** `string` — The event type.
 -   **`token`:** `WeakKey` — The handler’s lifetime token.
 -   **`fn`:** `fn` — The handler function.
 
@@ -545,7 +545,7 @@ Register an event handler. The handler is automatically unregistered when the
 host garbage-collects its `token`. Each handler can be registered once per
 token.
 
-#### `off(Signal,WeakKey,fn?):void`
+#### `off(string,WeakKey,fn?):void`
 
 ```typescript
 function off(type: 'resize', token: WeakKey, fn?: (_: Resize) => any): void;
@@ -553,7 +553,7 @@ function off(type: 'grow', token: WeakKey, fn?: (_: Grow) => any): void;
 function off(type: 'trim', token: WeakKey, fn?: (_: Trim) => any): void;
 ```
 
--   **`type`:** `Signal` — The event type.
+-   **`type`:** `string` — The event type.
 -   **`token`:** `WeakKey` — The handler’s lifetime token.
 -   **`fn`:** `fn` — The handler function.
 

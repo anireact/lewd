@@ -27,9 +27,6 @@ const enum $ {
     Align64K = 0x0FFF,
 }
 
-/** Event type union. */
-type Signal = 'resize' | 'grow' | 'trim';
-
 /** The `'resize'` event object. */
 interface Resize {
     /** Event type.    */ type: 'resize';
@@ -794,8 +791,8 @@ const on: {
      * @param fn    The handler function.
      */
     (type: 'trim', token: Key, fn: (_: Trim) => any): void;
-} = (type: Signal, token: Key, fn: (_: any) => any) => {
-    hub[type].on(token, fn);
+} = (type: string, token: Key, fn: (_: any) => any) => {
+    hub[type]?.on(token, fn);
 };
 
 /**
@@ -836,8 +833,8 @@ const off: {
      * @param fn    The handler function.
      */
     (type: 'trim', token: Key, fn?: (_: Trim) => any): void;
-} = (type: Signal, token: Key, fn?: (_: any) => any) => {
-    hub[type].off(token, fn);
+} = (type: string, token: Key, fn?: (_: any) => any) => {
+    hub[type]?.off(token, fn);
 };
 
 /**
@@ -870,12 +867,12 @@ const emit: {
      * @param info The event payload.
      */
     (type: 'trim', info: Resize.Info): void;
-} = (type: Signal, info: any): void => {
-    hub[type].run({ type, info } as any);
+} = (type: string, info: any): void => {
+    hub[type]?.run({ type, info } as any);
 };
 
 /** Event channels table. */
-const hub = {
+const hub: Record<string, Hub<any>> = {
     resize: /* */ /*#__PURE__*/ new Hub<Resize>(),
     grow: /*   */ /*#__PURE__*/ new Hub<Grow>(),
     trim: /*   */ /*#__PURE__*/ new Hub<Trim>(),
