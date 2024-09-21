@@ -54,9 +54,11 @@ especially the [Limitations](#limitations) and
         -   [`alloc()`](#alloci32weakkeyi32)
         -   [`trim()`](#trimvoid)
         -   [`bind()`](#bindtfnfnt)
-        -   [`watch()`](#watchfnweakkeyvoid)
         -   [`memory`](#memorywebassemblymemory)
         -   [`buffer`](#bufferarraybuffer)
+    -   [Events API](#events-api)
+        -   [`on()`](#onsignalweakkeyfnvoid)
+        -   [`off()`](#offsignalweakkeyfnvoid)
     -   [Stats API](#stats-api)
         -   [`total()`](#totalf64)
         -   [`used()`](#usedf64)
@@ -71,7 +73,7 @@ especially the [Limitations](#limitations) and
 
 ## Features
 
--   **Approx. 1 KiB minigzip**, and ≈2 KiB minified _no gzip_.
+-   **Approx. 1.5 KiB minigzip**, and ≈3 KiB minified _no gzip_.
 -   **Bundler/minifier annotations** to simplify tree-shaking and DCE.
 -   **Best-fit strategy** attempts to reduce memory fragmentation.
 -   **Efficient bookkeeping** with _zero_ overhead _(on the WASM side)_.
@@ -171,7 +173,7 @@ First, we import everything we’ll need later, and re-export the
 [`trim()`](#trimvoid) function:
 
 ```typescript
-import { alloc, trim, bind, watch, memory, buffer, cap } from '@anireact/lewd';
+import { alloc, trim, bind, memory, buffer, on } from '@anireact/lewd';
 
 export { trim };
 ```
@@ -359,9 +361,9 @@ class MyPRNG {
         this.#view = new Int32Array(buffer, this.#addr >>> 0, 4);
 
         // Register the memory resize handler:
-        watch(() => {
+        on(Signal.Resize, this, () => {
             this.#view = new Int32Array(buffer, this.#addr >>> 0, 4);
-        }, this);
+        });
 
         // Call the WASM-side constructor:
         impl.seed(this.#addr | 0, seed | 0);
@@ -381,7 +383,7 @@ memory leaks, because the allocator does everything for us automatically. And
 just like the `seed` argument, the call is type-hinted.
 
 Now we create an initial view into the allocated memory and register a handler
-to update it on memory resize with the [`watch()`](#watchfnweakkeyvoid) function
+to update it on memory resize with the [`on()`](#onsignalweakkeyfnvoid) function
 call. Just like the pointer, the handler is automatically unregistered when
 `this` is garbage-collected by the host. The important thing here is to cast the
 pointer to an unsigned integer with the `>>> 0` hint in the `Int32Array` calls,
@@ -471,7 +473,7 @@ function alloc(size: i32, token: WeakKey): i32;
 -   **`size`:** `i32` — The number of bytes to allocate.
 -   **`token`:** `WeakKey` — The lifetime token.
 
-Allocates `size` bytes and returns the allocated address.
+Allocate `size` bytes and get the allocated address.
 
 If the `token` is specified, it indicates the lifetime of the allocation, so the
 pointer is automatically deallocated when the host garbage-collects the `token`.
@@ -488,7 +490,7 @@ is still in use.
 function trim(): void;
 ```
 
-Releases unused memory pages in the end of memory back to the host/OS.
+Release unused memory pages in the end of memory back to the host/OS.
 
 Internally, it creates a trimmed copy of memory, copies the data into it, and
 then triggers the memory shrink handlers defined as the respawn callbacks of the
@@ -506,8 +508,8 @@ function bind<t>(initial: () => t, respawn: () => unknown): t;
     shrink. Should also capture and restore mutable globals, tables, etc. See
     the [Respawn callback](#the-respawn-callback) section for details.
 
-Registers a memory shrink handler `respawn`, immediately invokes the `spawn`
-callback, and returns its result.
+Register a memory shrink handler `respawn`, immediately invoke the `spawn`
+callback, and get its result.
 
 > **NB:**
 >
@@ -517,17 +519,6 @@ callback, and returns its result.
 >     respawn; instead, capture and restore the _initialized_ state (other than
 >     memory).
 
-#### `watch(fn,WeakKey):void`
-
-```typescript
-function watch(watcher: () => unknown, token: WeakKey): void;
-```
-
--   **`watcher`**: `fn` — The memory resize handler.
--   **`token`**: `WeakKey` — The handler’s lifetime token.
-
-Registers a memory resize handler. Can be used to refresh memory views.
-
 #### `memory:WebAssembly.Memory`
 
 The active memory object.
@@ -535,6 +526,69 @@ The active memory object.
 #### `buffer:ArrayBuffer`
 
 The active buffer object.
+
+### Events API
+
+#### `on(Signal,WeakKey,fn):void`
+
+```typescript
+function on(type: 'resize', token: WeakKey, fn: (_: Resize) => any): void;
+function on(type: 'grow', token: WeakKey, fn: (_: Grow) => any): void;
+function on(type: 'trim', token: WeakKey, fn: (_: Trim) => any): void;
+```
+
+-   **`type`:** `Signal` — The event type.
+-   **`token`:** `WeakKey` — The handler’s lifetime token.
+-   **`fn`:** `fn` — The handler function.
+
+Register an event handler. The handler is automatically unregistered when the
+host garbage-collects its `token`. Each handler can be registered once per
+token.
+
+#### `off(Signal,WeakKey,fn?):void`
+
+```typescript
+function off(type: 'resize', token: WeakKey, fn?: (_: Resize) => any): void;
+function off(type: 'grow', token: WeakKey, fn?: (_: Grow) => any): void;
+function off(type: 'trim', token: WeakKey, fn?: (_: Trim) => any): void;
+```
+
+-   **`type`:** `Signal` — The event type.
+-   **`token`:** `WeakKey` — The handler’s lifetime token.
+-   **`fn`:** `fn` — The handler function.
+
+Explicitly unregister the event handler. If no handler specified, all handlers
+of the given `token` are removed.
+
+#### interface `Resize`
+
+The `'resize'` event object type:
+
+-   **`type`:** `'resize'` — The event type.
+-   **`info`:** [`Resize.Info`](#interface-resizeinfo) — Resize details.
+
+#### interface `Grow`
+
+The `'grow'` event object type:
+
+-   **`type`:** `'grow'` — The event type.
+-   **`info`:** [`Resize.Info`](#interface-resizeinfo) — Resize details.
+
+#### interface `Trim`
+
+The `'trim'` event object type:
+
+-   **`type`:** `'trim'` — The event type.
+-   **`info`:** [`Resize.Info`](#interface-resizeinfo) — Resize details.
+
+#### interface `Resize.Info`
+
+The resize details object:
+
+-   **`oldSize`:** `f64` — Old memory size in bytes.
+-   **`newSize`:** `f64` — New memory size in bytes.
+-   **`memory`:** `WebAssembly.Memory` — Active memory object.
+-   **`buffer`:** `ArrayBuffer` — Active buffer object.
 
 ### Stats API
 
@@ -549,7 +603,7 @@ The active buffer object.
 function total(): f64;
 ```
 
-Returns the total memory size.
+Get the total memory size.
 
 #### `used():i32`
 
@@ -557,7 +611,7 @@ Returns the total memory size.
 function used(): f64;
 ```
 
-Returns the total allocated memory amount.
+Get the total allocated memory amount.
 
 #### `usedRun():i32`
 
@@ -565,7 +619,7 @@ Returns the total allocated memory amount.
 function usedRun(): f64;
 ```
 
-Returns the total used memory span size including free gaps between allocated
+Get the total used memory span size including free gaps between allocated
 chunks.
 
 #### `free():f64`
@@ -574,7 +628,7 @@ chunks.
 function free(): f64;
 ```
 
-Returns the total free memory amount.
+Get the total free memory amount.
 
 #### `headFree():f64`
 
@@ -582,7 +636,7 @@ Returns the total free memory amount.
 function headFree(): f64;
 ```
 
-Returns the amount of free memory in the beginning of memory. Calculated
+Get the amount of free memory in the beginning of memory. Calculated
 independently of [`tailFree`](#tailfreef64).
 
 #### `tailFree():f64`
@@ -591,8 +645,8 @@ independently of [`tailFree`](#tailfreef64).
 function tailFree(): f64;
 ```
 
-Returns the amount of free memory in the end of memory. Calculated independently
-of [`headFree`](#headfreef64).
+Get the amount of free memory in the end of memory. Calculated independently of
+[`headFree`](#headfreef64).
 
 #### `largestFree():f64`
 
@@ -600,7 +654,7 @@ of [`headFree`](#headfreef64).
 function largestFree(): f64;
 ```
 
-Returns the largest free chunk size, in 16-byte blocks.
+Get the largest free chunk size, in 16-byte blocks.
 
 ## TODO
 
@@ -616,7 +670,6 @@ Returns the largest free chunk size, in 16-byte blocks.
 -   [ ] Best effort next-fit strategy.
 -   [ ] Pointer kind conversion (strong to weak and vice versa).
 -   [ ] OOM handling.
--   [ ] Explicit unregistering of resize handlers.
 -   [ ] Debugging API.
 -   [ ] Configurable limits.
 -   [ ] Relocatable pointers.

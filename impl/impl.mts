@@ -3,7 +3,7 @@
 type bool = 0 | 1;
 
 /** Event handler function. */
-type Func = () => unknown;
+type Func<t> = (_: t) => any;
 
 /** A search tree node. */
 interface Node {
@@ -26,6 +26,136 @@ const enum $ {
     Align16  = 0x000F,
     Align64K = 0x0FFF,
 }
+
+/** Event type union. */
+type Signal = 'resize' | 'grow' | 'trim';
+
+/** The `'resize'` event object. */
+interface Resize {
+    /** Event type.    */ type: 'resize';
+    /** Event details. */ info: Resize.Info;
+}
+
+/** The `'grow'` event object. */
+interface Grow {
+    /** Event type.    */ type: 'grow';
+    /** Event details. */ info: Resize.Info;
+}
+
+/** The `'trim'` event object. */
+interface Trim {
+    /** Event type.    */ type: 'trim';
+    /** Event details. */ info: Resize.Info;
+}
+
+namespace Resize {
+    /** The resize details object. */
+    export interface Info {
+        /** Old memory size in bytes. */ readonly oldSize: number;
+        /** New memory size in bytes. */ readonly newSize: number;
+        /** Active memory object.     */ readonly memory: WebAssembly.Memory;
+        /** Active buffer object.     */ readonly buffer: ArrayBuffer;
+    }
+}
+
+/** Weak key type. */
+type Key = WeakKey;
+
+/** Untyped weak reference type. */
+type Ref = WeakRef<Key>;
+
+/** Event hub record type. */
+interface Rec<t> {
+    /** Token weak reference. */ ref: Ref;
+    /** Handlers set.         */ set: Set<Func<t>>;
+}
+
+/** Event hub finalization context. */
+interface Context {
+    /** Token weak reference to finalize. */ ref: Ref;
+    /** The event hub to finalize.        */ hub: Hub<any>;
+}
+
+/** Weak event emitter. */
+class Hub<t> {
+    /** The main weak map. */ m = new WeakMap<Key, Rec<t>>();
+    /** The index set.     */ s = new Set<Ref>();
+
+    /**
+     * Register a listener {@linkcode fn} for the lifetime token {@linkcode key}.
+     */ // prettier-ignore
+    on = (key: Key, fn: Func<t>): void => {
+        /** Active hub record.     */ var rec: null | Rec<t> = null;
+        /** Active weak reference. */ var ref: null | Ref    = null;
+
+        // ↓ 1. Get the record:
+        rec = this.m.get(key) ?? null;
+
+        // a) The key has an existing record:
+        if (rec) {
+            ref = rec.ref;                 // ← 1. Get the canonical weak reference.
+        }
+
+        // b) The key has no record:
+        else {
+            ref = new WeakRef(key);        // ← 1. Create new weak reference.
+            rec = { ref, set: new Set() }; // ← 2. Initialize the record with an empty handlers set.
+        }
+
+        // 4. ↓) Do the bookkeeping:
+        rec.set.add(fn);                            // ← 1. Register the listener.
+        this.m.set(key, rec);                       // ← 2. Register the record.
+        this.s.add(ref);                            // ← 3. Register the index key.
+        reg.register(key, { ref, hub: this }, key); // ← 4. Register the finalizer.
+    };
+
+    /**
+     * Unregister a listener {@linkcode fn} or all listeners of the given token {@linkcode key}.
+     */ // prettier-ignore
+    off = (key: Key, fn?: Func<t>): void => {
+        /** Active hub record. */ var rec: null | Rec<t> = null;
+
+        rec = this.m.get(key) ?? null; // ← 1. Get the record.
+        if (!rec) return;              // ← 2. Short-circuit if there’s nothing to do.
+
+        if (fn) rec.set.delete(fn);    // ← 3. Unregister the handler.
+        else    rec.set.clear();       // ← 4. Unregister all handlers.
+
+        // ↓ The handlers set is empty:
+        if (!rec.set.size) {
+            this.s.delete(rec.ref); // 1. Delete the token from the index.
+            this.m.delete(key);     // 2. Delete the record from the records map.
+            reg.unregister(key);    // 3. Unregister the finalizer.
+        }
+    };
+
+    /**
+     * Trigger the event with the given {@linkcode payload}.
+     */ // prettier-ignore
+    run = (payload: t): void => {
+        /** Current weak reference.   */ var ref: null | Ref    = null;
+        /** Current referenced value. */ var key: null | Key    = null;
+        /** Current hub record.       */ var rec: null | Rec<t> = null;
+
+        // ↓ Iter over the wek references set:
+        for (ref of this.s) {
+            // ↓ 1. Get the referenced value:
+            key = ref.deref()     ?? null; if (!key) continue;
+
+            // ↓ 2. Get the associated record:
+            rec = this.m.get(key) ?? null; if (!rec) continue;
+
+            // ↓ 3. Iter over the handlers set and trigger them:
+            for (let fn of rec.set) fn(payload);
+        }
+    };
+}
+
+/** Event handlers finalization registry. */
+const reg = new FinalizationRegistry<Context>(context => {
+    // ↓ Just delete the reference from the index set:
+    context.hub.s.delete(context.ref);
+});
 // #endregion Types
 
 // #region Pure functions
@@ -274,7 +404,7 @@ const lt = (a: Zone, b: Zone): bool => {
 
 // #region Memory management
 /**
- * Allocates {@linkcode size} bytes and returns the allocated address.
+ * Allocate {@linkcode size} bytes and get the allocated address.
  *
  * If the {@linkcode token} is specified, it indicates the lifetime of the
  * allocation, so the pointer is automatically deallocated when the host
@@ -289,7 +419,7 @@ const lt = (a: Zone, b: Zone): bool => {
  * @param size  The number of bytes to allocate.
  * @param token The lifetime token.
  */ /*#__NO_SIDE_EFFECTS__*/ // prettier-ignore
-const alloc = (size: number, token?: WeakKey): number => {
+const alloc = (size: number, token?: Key): number => {
     size = size | 0;
 
     var node: null | Node = null;
@@ -298,6 +428,8 @@ const alloc = (size: number, token?: WeakKey): number => {
 
     var free: null | Zone = null;
     var used: null | Zone = null;
+
+    var info: null | Resize.Info = null;
 
     // ↓ 1. Align and shift the size:
     size = (size + (-size & $.Align16) | 0) >>> 4 | 0;
@@ -337,10 +469,16 @@ const alloc = (size: number, token?: WeakKey): number => {
     else {
         // ↓ a) The last zone is free:
         if (last.f) {
-            temp = size - (measure(last) | 0) | 0;               // ← 1. Compute the number of 16-byte blocks to grow the memory by.
-            del(last);                                           // ← 2. Temporarily delete the last zone from the tree.
-            memory.grow(temp + (-temp & $.Align64K) >>> 12) | 0; // ← 3. Grow the memory.
-            add(last);                                           // ← 4. Add the last zone back to the tree.
+
+            try {
+                temp = size - (measure(last) | 0) | 0;               // ← 1. Compute the number of 16-byte blocks to grow the memory by.
+                del(last);                                           // ← 2. Temporarily delete the last zone from the tree.
+                memory.grow(temp + (-temp & $.Align64K) >>> 12) | 0; // ← 3. Actually grow the memory.
+            } catch (error) {
+                throw error;
+            } finally {
+                add(last); // ← 4. Add the last zone back to the tree.
+            }
         }
 
         // ↓ b) The last zone is used:
@@ -349,14 +487,30 @@ const alloc = (size: number, token?: WeakKey): number => {
             Free(cap, last, null);                               // ← 2. Create and link new free zone.
         }
 
-        // ↓ c) Finally:
+        // ↓ 3. Finally:
+        //   -----------
 
-        /*#__NOINLINE__*/ rebind();                              // ← 1. Update bindings after resize.
-        /*#__NOINLINE__*/ notify();                              // ← 2. Notify resize listeners.
-        free = last;                                             // ← 3. Use the last zone.
+        // ↓ 1. Refresh the internal state:
+        temp = cap;                 // ← 1. Capture the current memory size.
+        /*#__NOINLINE__*/ rebind(); // ← 2. Update bindings after resize.
+
+        // ↓ 2. Create the event payload object:
+        info = Object.freeze({
+            oldSize: +bytes(temp),  // ← 1. The old memory size.
+            newSize: +bytes(cap),   // ← 2. Pass the new memory size.
+            memory,                 // ← 3. Pass the current memory.
+            buffer,                 // ← 4. Pass the new buffer.
+        });
+
+        // ↓ 3. Trigger events:
+        emit('grow',   info);       // ← 1. Trigger the `grow` event.
+        emit('resize', info);       // ← 2. Trigger the `resize` event.
+
+        // ↓ 4. Finish the procedure:
+        free = last;
     }
 
-    // ↓ c) Actually allocate:
+    // ↓ 4. Actually allocate:
     //   ---------------------
 
     // ↓ Lifetime token is specified:
@@ -375,7 +529,7 @@ const alloc = (size: number, token?: WeakKey): number => {
 };
 
 /**
- * Releases unused memory pages in the end of memory back to the host/OS.
+ * Release unused memory pages in the end of memory back to the host/OS.
  *
  * Internally, it creates a trimmed copy of memory, copies the data into it, and
  * then triggers the memory shrink handlers defined as the respawn callbacks of
@@ -385,25 +539,46 @@ const alloc = (size: number, token?: WeakKey): number => {
 const trim = (): void => {
     if (!last.f) return;
 
-    /** Total used span size.  */ var size                   = 0;
-    /** Current memory data.   */ var old: null | Int32Array = null;
-    /** Memory shrink handler. */ var app: null | Func       = null;
+    /** Total used span size.  */ var size                     = 0;
+    /** Old size.              */ var temp                     = 0;
+    /** Current memory data.   */ var old:  null | Int32Array  = null;
+    /** Memory shrink handler. */ var app:  null | Func<void>  = null;
+    /** Event payload.         */ var info: null | Resize.Info = null;
 
     // ↓ 1. Calculate the memory amount to release:
-    size = last.a | 0;                                // ← 1. Get the last zone size.
-    size = size + (-size & $.Align64K) | 0;           // ← 2. Align to 64 KiB.
-    if (!size) size = 0x1000;                         // ← 3. Preserve at least one page.
-    if (size >>> 0 >= cap >>> 0) return;              // ← 4. Nothing to release.
+    //   ------------------------------------------
+
+    temp = cap;                                       // ← 1. Capture the old size.
+    size = last.a | 0;                                // ← 2. Get the last zone size.
+    size = size + (-size & $.Align64K) | 0;           // ← 3. Align to 64 KiB.
+    if (!size) size = 0x1000;                         // ← 4. Preserve at least one page.
+    if (size >>> 0 >= cap >>> 0) return;              // ← 5. Nothing to release.
 
     // ↓ 2. Respawn and migrate the memory:
+    //   ----------------------------------
+
     old = new Int32Array(buffer, 0, size << 2 >>> 0); // ← 1. Capture the current data.
     memory = Memory(size >>> 12);                     // ← 2. Spawn new memory.
     /*#__NOINLINE__*/ rebind();                       // ← 3. Update bindings after resize.
     new Int32Array(buffer).set(old);                  // ← 4. Copy the data.
 
     // ↓ 3. Notify listeners:
-    for (app of apps) app();                          // ← 1. Notify shrink listeners.
-    /*#__NOINLINE__*/ notify();                       // ← 2. Notify resize listeners.
+    //   --------------------
+
+    // ↓ 1. Respawn WASM modules:
+    for (app of apps) app();
+
+    // ↓ 2. Create the event payload object:
+    info = Object.freeze({
+        oldSize: +bytes(temp), // ← 1. The old memory size.
+        newSize: +bytes(cap),  // ← 2. Pass the new memory size.
+        memory,                // ← 3. Pass the current memory.
+        buffer,                // ← 4. Pass the new buffer.
+    });
+
+    // ↓ 3. Trigger events:
+    emit('trim',   info);      // ← 1. Trigger the `trim` event.
+    emit('resize', info);      // ← 2. Trigger the `resize` event.
 };
 
 /**
@@ -417,160 +592,7 @@ const rebind = () => {
     if (+len == +4294967296.0) cap = 0x10000000;     // ← 3. Special-case the 4 GiB capacity.
     else                       cap = (~~+len >>> 4); // ← 4. Update the buffer size.
 };
-// #endregion Memory management
 
-// #region Event system
-/**
- * Registers a memory shrink handler {@linkcode respawn}, immediately invokes
- * the {@linkcode spawn} callback, and returns its result.
- *
- * **Notes:**
- *
- * -   If a WASM module has mutable globals, tables, etc., don’t forget to
- *     capture and restore them on respawn.
- * -   If a module has a global initialization procedure, don’t call it on
- *     respawn; instead, capture and restore the _initialized_ state (other than
- *     memory).
- *
- * @param spawn   The immediately invoked spawn callback. See the Spawn callback section in README for details.
- * @param respawn The handler to respawn the WASM instance on memory shrink. Should also capture and restore mutable globals, tables, etc. See the Respawn callback section in README for details.
- */ /*#__NO_SIDE_EFFECTS__*/
-const bind = <t extends unknown>(spawn: () => t, respawn: () => unknown): t => {
-    apps.add(respawn);
-    return spawn();
-};
-
-/**
- * Registers a memory resize handler. Can be used to refresh memory views.
- *
- * @param watcher The memory resize handler.
- * @param token   The handler’s lifetime token.
- */ /*#__NO_SIDE_EFFECTS__*/
-const watch = (watcher: () => unknown, token: WeakKey): void => {
-    var wref: WeakRef<WeakKey>;
-    var fset = wmap.get(token);
-
-    if (!fset) {
-        wref = new WeakRef(token);
-        fset = new Set();
-        wmap.set(token, fset);
-        wset.add(wref);
-        wreg.register(token, wref);
-    }
-
-    fset.add(watcher);
-};
-
-/**
- * Notify memory resize handlers.
- */
-const notify = () => {
-    var wref: null | WeakRef<WeakKey> = null;
-    var func: null | Func = null;
-    for (wref of wset) for (func of wmap.get(wref.deref()!) ?? []) func();
-};
-// #endregion Event system
-
-// #region Testing helpers
-/**
- * Reset the internal state (everything we can reset).
- */
-const reset = (): void => {
-    apps = new Set();
-    wset = new Set();
-    wmap = new WeakMap();
-    memory = Memory(1);
-    buffer = memory.buffer;
-    cap = 0x1000;
-    allocd = 0;
-    head = { f: 1, a: 0, p: null, n: null };
-    last = head;
-    root = { z: head, h: 1, l: null, r: null };
-};
-// #endregion Testing helpers
-
-// #region Usage stats
-/**
- * Convert 16-byte blocks count to bytes.
- */
-const bytes = (x: number) => {
-    x = x | 0;
-    return +(+(x >>> 0) * 16.0);
-};
-
-/**
- * Total memory size.
- */ // prettier-ignore
-const total = (): number => {
-    return +bytes(cap);
-};
-
-/**
- * Total allocated memory amount.
- */ // prettier-ignore
-const used = (): number => {
-    return +bytes(allocd);
-};
-
-/**
- * Total used memory span size including free gaps between allocated chunks.
- */ // prettier-ignore
-const usedRun = (): number => {
-    var z = 0;
-
-    z = cap;
-
-    if (head.f)                            z = z - (measure(head) | 0) | 0;
-    if (last.f & ((head !== last) as any)) z = z - (measure(last) | 0) | 0;
-
-    return +bytes(z);
-};
-
-/**
- * Total free memory amount.
- */ // prettier-ignore
-const free = (): number => {
-    return +bytes(cap - allocd | 0);
-};
-
-/**
- * Amount of free memory in the beginning of memory. Calculated independently
- * of {@linkcode tailFree}.
- */ // prettier-ignore
-const headFree = (): number => {
-    if (head.f) return +bytes(measure(head) | 0);
-    else        return +0.0;
-};
-
-/**
- * Amount of free memory in the end of memory. Calculated independently
- * of {@linkcode headFree}.
- */ // prettier-ignore
-const tailFree = (): number => {
-    if (last.f) return +bytes(measure(last) | 0);
-    else        return +0.0;
-};
-
-/**
- * Largest free chunk size.
- */ // prettier-ignore
-const largestFree = (): number => {
-    var node: null | Node = null;
-    var last: null | Node = null;
-
-    node = root;
-
-    while (node) {
-        last = node;
-        node = node.r;
-    }
-
-    if (last) return +bytes(measure(last.z) | 0);
-    else      return +0.0;
-};
-// #endregion Usage stats
-
-// #region GC handlers
 /**
  * Pointer finalization registry.
  */ // prettier-ignore
@@ -610,20 +632,257 @@ const preg = /*#__PURE__*/ new FinalizationRegistry<Zone>(zone => {
         return Free(zone.a, zone.p, zone.n);           // ← 2. Add new free zone to the tree.
     }
 });
+// #endregion Memory management
+
+// #region Usage stats
+/**
+ * Convert 16-byte blocks count to bytes.
+ */
+const bytes = (x: number) => {
+    x = x | 0;
+    return +(+(x >>> 0) * 16.0);
+};
 
 /**
- * Resize watcher finalization registry.
- */
-const wreg = /*#__PURE__*/ new FinalizationRegistry<WeakRef<WeakKey>>(ref => {
-    return wset.delete(ref);
-});
-// #endregion GC handlers
+ * Get the total memory size.
+ */ // prettier-ignore
+const total = (): number => {
+    return +bytes(cap);
+};
 
-// #region Subscriber registries
-/** Memory shrink handlers. */ var apps: Set<Func> /*                   */ = /*#__PURE__*/ new Set();
-/** Resize handlers set.    */ var wset: Set<WeakRef<WeakKey>> /*       */ = /*#__PURE__*/ new Set();
-/** Resize handlers map.    */ var wmap: WeakMap<WeakKey, Set<Func>> /* */ = /*#__PURE__*/ new WeakMap();
-// #endregion Subscriber registries
+/**
+ * Get the total allocated memory amount.
+ */ // prettier-ignore
+const used = (): number => {
+    return +bytes(allocd);
+};
+
+/**
+ * Get the total used memory span size including free gaps between allocated chunks.
+ */ // prettier-ignore
+const usedRun = (): number => {
+    var z = 0;
+
+    z = cap;
+
+    if (head.f)                            z = z - (measure(head) | 0) | 0;
+    if (last.f & ((head !== last) as any)) z = z - (measure(last) | 0) | 0;
+
+    return +bytes(z);
+};
+
+/**
+ * Get the total free memory amount.
+ */ // prettier-ignore
+const free = (): number => {
+    return +bytes(cap - allocd | 0);
+};
+
+/**
+ * Get the amount of free memory in the beginning of memory. Calculated
+ * independently of {@linkcode tailFree}.
+ */ // prettier-ignore
+const headFree = (): number => {
+    if (head.f) return +bytes(measure(head) | 0);
+    else        return +0.0;
+};
+
+/**
+ * Get the amount of free memory in the end of memory. Calculated independently
+ * of {@linkcode headFree}.
+ */ // prettier-ignore
+const tailFree = (): number => {
+    if (last.f) return +bytes(measure(last) | 0);
+    else        return +0.0;
+};
+
+/**
+ * Get the largest free chunk size.
+ */ // prettier-ignore
+const largestFree = (): number => {
+    var node: null | Node = null;
+    var last: null | Node = null;
+
+    node = root;
+
+    while (node) {
+        last = node;
+        node = node.r;
+    }
+
+    if (last) return +bytes(measure(last.z) | 0);
+    else      return +0.0;
+};
+// #endregion Usage stats
+
+// #region Testing helpers
+/**
+ * Reset the internal state (everything we can reset).
+ */
+const reset = (): void => {
+    apps = new Set();
+    memory = Memory(1);
+    buffer = memory.buffer;
+    cap = 0x1000;
+    allocd = 0;
+    head = { f: 1, a: 0, p: null, n: null };
+    last = head;
+    root = { z: head, h: 1, l: null, r: null };
+};
+// #endregion Testing helpers
+
+// #region Events
+/**
+ * Register a memory shrink handler {@linkcode respawn}, immediately invoke
+ * the {@linkcode spawn} callback, and get its result.
+ *
+ * **Notes:**
+ *
+ * -   If a WASM module has mutable globals, tables, etc., don’t forget to
+ *     capture and restore them on respawn.
+ * -   If a module has a global initialization procedure, don’t call it on
+ *     respawn; instead, capture and restore the _initialized_ state (other than
+ *     memory).
+ *
+ * @param spawn   The immediately invoked spawn callback. See the Spawn callback section in README for details.
+ * @param respawn The handler to respawn the WASM instance on memory shrink. Should also capture and restore mutable globals, tables, etc. See the Respawn callback section in README for details.
+ */ /*#__NO_SIDE_EFFECTS__*/
+const bind = <t extends unknown>(spawn: () => t, respawn: () => any): t => {
+    apps.add(respawn);
+    return spawn();
+};
+
+/**
+ * Register an event handler. The handler is automatically unregistered when the
+ * host garbage-collects its {@linkcode token}. Each handler can be registered
+ * once per token.
+ *
+ * @param type  The event type.
+ * @param token The handler’s lifetime token.
+ * @param fn    The handler function.
+ */
+const on: {
+    /**
+     * Register a `'resize'` event handler. The handler is automatically
+     * unregistered when the host garbage-collects its {@linkcode token}. Each
+     * handler can be registered once per token.
+     *
+     * @param type  The event type.
+     * @param token The handler’s lifetime token.
+     * @param fn    The handler function.
+     */
+    (type: 'resize', token: Key, fn: (_: Resize) => any): void;
+
+    /**
+     * Register a `'grow'` event handler. The handler is automatically
+     * unregistered when the host garbage-collects its {@linkcode token}. Each
+     * handler can be registered once per token.
+     *
+     * @param type  The event type.
+     * @param token The handler’s lifetime token.
+     * @param fn    The handler function.
+     */
+    (type: 'grow', token: Key, fn: (_: Grow) => any): void;
+
+    /**
+     * Register a `'trim'` event handler. The handler is automatically
+     * unregistered when the host garbage-collects its {@linkcode token}. Each
+     * handler can be registered once per token.
+     *
+     * @param type  The event type.
+     * @param token The handler’s lifetime token.
+     * @param fn    The handler function.
+     */
+    (type: 'trim', token: Key, fn: (_: Trim) => any): void;
+} = (type: Signal, token: Key, fn: (_: any) => any) => {
+    hub[type].on(token, fn);
+};
+
+/**
+ * Explicitly unregister the event handler. If no handler specified, all
+ * handlers of the given {@linkcode token} are removed.
+ *
+ * @param type  The event type.
+ * @param token The handler’s lifetime token.
+ * @param fn    The handler function.
+ */
+const off: {
+    /**
+     * Explicitly unregister a `'resize'` handler. If no handler specified, all
+     * handlers of the given {@linkcode token} are removed.
+     *
+     * @param type  The event type.
+     * @param token The handler’s lifetime token.
+     * @param fn    The handler function.
+     */
+    (type: 'resize', token: Key, fn?: (_: Resize) => any): void;
+
+    /**
+     * Explicitly unregister a `'grow'` handler. If no handler specified, all
+     * handlers of the given {@linkcode token} are removed.
+     *
+     * @param type  The event type.
+     * @param token The handler’s lifetime token.
+     * @param fn    The handler function.
+     */
+    (type: 'grow', token: Key, fn?: (_: Grow) => any): void;
+
+    /**
+     * Explicitly unregister a `'trim'` handler. If no handler specified, all
+     * handlers of the given {@linkcode token} are removed.
+     *
+     * @param type  The event type.
+     * @param token The handler’s lifetime token.
+     * @param fn    The handler function.
+     */
+    (type: 'trim', token: Key, fn?: (_: Trim) => any): void;
+} = (type: Signal, token: Key, fn?: (_: any) => any) => {
+    hub[type].off(token, fn);
+};
+
+/**
+ * Trigger an event.
+ *
+ * @param type The event type to trigger.
+ * @param info The event payload.
+ */
+const emit: {
+    /**
+     * Trigger a `'resize'` event.
+     *
+     * @param type The event type.
+     * @param info The event payload.
+     */
+    (type: 'resize', info: Resize.Info): void;
+
+    /**
+     * Trigger a `'grow'` event.
+     *
+     * @param type The event type.
+     * @param info The event payload.
+     */
+    (type: 'grow', info: Resize.Info): void;
+
+    /**
+     * Trigger a `'oom'` event.
+     *
+     * @param type The event type.
+     * @param info The event payload.
+     */
+    (type: 'trim', info: Resize.Info): void;
+} = (type: Signal, info: any): void => {
+    hub[type].run({ type, info } as any);
+};
+
+/** Event channels table. */
+const hub = {
+    resize: /* */ /*#__PURE__*/ new Hub<Resize>(),
+    grow: /*   */ /*#__PURE__*/ new Hub<Grow>(),
+    trim: /*   */ /*#__PURE__*/ new Hub<Trim>(),
+};
+
+/** Memory shrink handlers. */ var apps: Set<Func<void>> = /*#__PURE__*/ new Set();
+// #endregion Events
 
 // #region The memory etc.
 /** The active memory object. */ var memory: WebAssembly.Memory /* */ = /*#__PURE__*/ Memory(1);
@@ -631,8 +890,8 @@ const wreg = /*#__PURE__*/ new FinalizationRegistry<WeakRef<WeakKey>>(ref => {
 // #endregion The memory etc.
 
 // #region Usage stats
-/** Total memory size, in 16-byte blocks.                                   */ var cap: /*    */ number = 0x1000;
-/** Total used memory, in 16-byte blocks.                                   */ var allocd: /* */ number = 0;
+/** Total memory size, in 16-byte blocks. */ var cap: /*    */ number = 0x1000;
+/** Total used memory, in 16-byte blocks. */ var allocd: /* */ number = 0;
 // #endregion Usage stats
 
 // #region Data structures
@@ -642,10 +901,13 @@ const wreg = /*#__PURE__*/ new FinalizationRegistry<WeakRef<WeakKey>>(ref => {
 // #endregion Data structures
 
 // Primary API:
-export { alloc, trim, bind, watch, memory, buffer };
+export { Key, alloc, trim, bind, memory, buffer };
 
 // Stats API:
 export { total, used, usedRun, free, headFree, tailFree, largestFree };
 
+// Events API:
+export { Resize, Grow, Trim, on, off };
+
 // Private API:
-export { bool, Func, Node, Zone, Free, add, del, unlink, measure, lt, reset, apps, wset, wmap, head, last, root };
+export { bool, Node, Zone, Free, add, del, unlink, measure, lt, reset, apps, head, last, root };

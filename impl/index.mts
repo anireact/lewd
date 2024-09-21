@@ -3,7 +3,6 @@ export {
     alloc,
     trim,
     bind,
-    watch,
     memory,
     buffer,
 
@@ -15,4 +14,11 @@ export {
     headFree,
     tailFree,
     largestFree,
+
+    // Events API:
+    Resize,
+    Grow,
+    Trim,
+    on,
+    off,
 } from './impl.mjs';
