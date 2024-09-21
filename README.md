@@ -609,7 +609,7 @@ function total(): f64;
 
 Get the total memory size.
 
-#### `used():i32`
+#### `used():f64`
 
 ```typescript
 function used(): f64;
@@ -617,7 +617,7 @@ function used(): f64;
 
 Get the total allocated memory amount.
 
-#### `usedRun():i32`
+#### `usedRun():f64`
 
 ```typescript
 function usedRun(): f64;
