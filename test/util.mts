@@ -1,5 +1,5 @@
-import { alloc } from '@anireact/lewd';
-import { bool, Node, Zone, measure, head, root } from '#self/impl';
+import { bool, alloc } from '@anireact/lewd';
+import { Node, Zone, measure, head, root } from '#self/impl';
 
 interface Span {
     free: bool;

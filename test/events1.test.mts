@@ -1,6 +1,6 @@
 import { describe, test, expect } from '@jest/globals';
 
-import { alloc, trim, buffer, on, free } from '@anireact/lewd';
+import { alloc, trim, buffer, on, freeBytes } from '@anireact/lewd';
 import { gc } from './util.mjs';
 
 describe('Events', () => {
@@ -45,7 +45,7 @@ describe('Events', () => {
 
         await gc();
 
-        expect(free()).toBe(0x10000);
+        expect(freeBytes()).toBe(0x10000);
 
         void x;
     });

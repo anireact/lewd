@@ -32,15 +32,15 @@ can forget about memory leaks, and more.
 
 But it **is not** a general-purpose allocator, so read the docs carefully,
 especially the [Limitations](#limitations) and
-[Minimal complete example](#minimal-complete-example) sections.
+[Getting started](#getting-started) sections.
 
 ## Contents
 
 -   [Features](#features)
 -   [Limitations](#limitations)
--   [Minimal complete example](#minimal-complete-example)
+-   [Getting started](#getting-started)
     -   [The WASM Side](#the-wasm-side)
-    -   [Getting started](#getting-started)
+    -   [Library imports](#library-imports)
     -   [Load the module](#load-the-module)
     -   [Initialize the module](#initialize-the-module)
         -   [The spawn callback](#the-spawn-callback)
@@ -52,6 +52,7 @@ especially the [Limitations](#limitations) and
 -   [API](#api)
     -   [Primary API](#primary-api)
         -   [`alloc()`](#alloci32weakkeyi32)
+        -   [`grow()`](#growi32bool)
         -   [`trim()`](#trimvoid)
         -   [`bind()`](#bindtfnfnt)
         -   [`memory`](#memorywebassemblymemory)
@@ -62,15 +63,12 @@ especially the [Limitations](#limitations) and
         -   [interface `Resize`](#interface-resize)
         -   [interface `Grow`](#interface-grow)
         -   [interface `Trim`](#interface-trim)
+        -   [interface `OOM`](#interface-oom)
         -   [interface `Resize.Info`](#interface-resizeinfo)
+        -   [interface `OOM.Info`](#interface-oominfo)
     -   [Stats API](#stats-api)
-        -   [`total()`](#totalf64)
-        -   [`used()`](#usedf64)
-        -   [`usedRun()`](#usedrunf64)
-        -   [`free()`](#freef64)
-        -   [`headFree()`](#headfreef64)
-        -   [`tailFree()`](#tailfreef64)
-        -   [`largestFree()`](#largestfreef64)
+        -   [Byte values](#byte-values)
+        -   [Granular values](#granular-values)
 -   [TODO](#todo)
 -   [Support](#support)
 -   [License](#license)
@@ -108,7 +106,7 @@ Some of the limitations can be worked around, some others can be worked around
 in a limited number of scenarios, and others are fundamental to our design and
 goals and can’t be worked around at all.
 
-## Minimal complete example
+## Getting started
 
 Let’s consider a simple PRNG written in plain WASM, that we want to wrap in a JS
 _library_. The algorithm has a 128-bit state and provides a number of methods to
@@ -171,7 +169,7 @@ public:
 };
 ```
 
-### Getting started
+### Library imports
 
 First, we import everything we’ll need later, and re-export the
 [`trim()`](#trimvoid) function:
@@ -488,6 +486,21 @@ returned. This can save some CPU cycles by skipping the underlying bookkeeping,
 but should be used carefully to avoid any allocations while the scratch memory
 is still in use.
 
+**Exceptions:**
+
+-   On OOM, or if `size` is zero, throws a `RangeError`.
+
+#### `grow(i32):bool`
+
+```typescript
+function grow(diff: i32): bool;
+```
+
+-   **`diff`:** `i32` — Number of 64 KiB pages to grow the memory by.
+
+Grow the memory by `diff` 64 KiB pages and return `0` on success or `1` on OOM.
+If `diff` is zero or negative, does nothing.
+
 #### `trim():void`
 
 ```typescript
@@ -539,6 +552,7 @@ The active buffer object.
 function on(type: 'resize', token: WeakKey, fn: (_: Resize) => any): void;
 function on(type: 'grow', token: WeakKey, fn: (_: Grow) => any): void;
 function on(type: 'trim', token: WeakKey, fn: (_: Trim) => any): void;
+function on(type: 'oom', token: WeakKey, fn: (_: OOM) => any): void;
 ```
 
 -   **`type`:** `string` — The event type.
@@ -555,6 +569,7 @@ token.
 function off(type: 'resize', token: WeakKey, fn?: (_: Resize) => any): void;
 function off(type: 'grow', token: WeakKey, fn?: (_: Grow) => any): void;
 function off(type: 'trim', token: WeakKey, fn?: (_: Trim) => any): void;
+function off(type: 'oom', token: WeakKey, fn?: (_: OOM) => any): void;
 ```
 
 -   **`type`:** `string` — The event type.
@@ -585,6 +600,13 @@ The `'trim'` event object type:
 -   **`type`:** `'trim'` — The event type.
 -   **`info`:** [`Resize.Info`](#interface-resizeinfo) — Resize details.
 
+#### interface `OOM`
+
+The `'oom'` event object type:
+
+-   **`type`:** `'oom'` — The event type.
+-   **`info`:** [`OOM.Info`](#interface-oominfo) — OOM details.
+
 #### interface `Resize.Info`
 
 The resize details object:
@@ -594,76 +616,45 @@ The resize details object:
 -   **`memory`:** `WebAssembly.Memory` — Active memory object.
 -   **`buffer`:** `ArrayBuffer` — Active buffer object.
 
+#### interface `OOM.Info`
+
+The OOM details object:
+
+-   **`currentCapacity`:** `i32` — Current capacity in 64 KiB pages.
+-   **`requestCapacity`:** `i32` — Requested capacity in 64 KiB pages.
+-   **`maximumCapacity`:** `i32` — Maximum capacity in 64 KiB pages.
+
 ### Stats API
 
-> **NB:**
->
-> All functions here return values as 64-bit floating point numbers, not
-> integers.
+#### Byte values
 
-#### `total():f64`
+-   **`totalBytes():f64`** — Get the memory capacity in bytes.
+-   **`usedBytes():f64`** — Get the number of allocated bytes.
+-   **`runBytes():f64`** — Get the used span size in bytes, including free gaps
+    between allocated chunks.
+-   **`freeBytes():f64`** — Get the number of free bytes.
+-   **`headBytes():f64`** — Get the number free bytes in the beginning of
+    memory. Calculated independently of `tailBytes`.
+-   **`tailBytes():f64`** — Get the number free bytes in the end of memory.
+    Calculated independently of `headBytes`.
+-   **`largestBytes():f64`** — Get the largest free chunk size in bytes.
 
-```typescript
-function total(): f64;
-```
+#### Granular values
 
-Get the total memory size.
-
-#### `used():f64`
-
-```typescript
-function used(): f64;
-```
-
-Get the total allocated memory amount.
-
-#### `usedRun():f64`
-
-```typescript
-function usedRun(): f64;
-```
-
-Get the total used memory span size including free gaps between allocated
-chunks.
-
-#### `free():f64`
-
-```typescript
-function free(): f64;
-```
-
-Get the total free memory amount.
-
-#### `headFree():f64`
-
-```typescript
-function headFree(): f64;
-```
-
-Get the amount of free memory in the beginning of memory. Calculated
-independently of [`tailFree`](#tailfreef64).
-
-#### `tailFree():f64`
-
-```typescript
-function tailFree(): f64;
-```
-
-Get the amount of free memory in the end of memory. Calculated independently of
-[`headFree`](#headfreef64).
-
-#### `largestFree():f64`
-
-```typescript
-function largestFree(): f64;
-```
-
-Get the largest free chunk size, in 16-byte blocks.
+-   **`totalAtoms():i32`** — Get the memory capacity in 16-byte atoms.
+-   **`usedAtoms():i32`** — Get the number of allocated 16-byte atoms.
+-   **`runAtoms():i32`** — Get the used span size in 16-byte atoms, including
+    free gaps between allocated chunks.
+-   **`freeAtoms():i32`** — Get the number of free 16-byte atoms.
+-   **`headAtoms():i32`** — Get the number free 16-byte atoms in the beginning
+    of memory. Calculated independently of `tailAtoms`.
+-   **`tailAtoms():i32`** — Get the number free 16-byte atoms in the end of
+    memory. Calculated independently of `headAtoms`.
+-   **`largestAtoms():i32`** — Get the largest free chunk size in 16-byte atoms.
 
 ## TODO
 
 -   [ ] `malloc()`, `realloc()`, `calloc()`, `free()` — C-like API.
--   [ ] `grow()` — explicit memory expansion.
 -   [ ] Span protection to prevent `(data)` and/or stack corruption (and
         effectively support `__heap_base` or whatever your compiler uses
         instead).
@@ -673,7 +664,6 @@ Get the largest free chunk size, in 16-byte blocks.
 -   [ ] Arbitrary alignment.
 -   [ ] Best effort next-fit strategy.
 -   [ ] Pointer kind conversion (strong to weak and vice versa).
--   [ ] OOM handling.
 -   [ ] Debugging API.
 -   [ ] Configurable limits.
 -   [ ] Relocatable pointers.

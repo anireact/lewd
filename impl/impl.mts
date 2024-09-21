@@ -45,6 +45,12 @@ interface Trim {
     /** Event details. */ info: Resize.Info;
 }
 
+/** The `'oom'` event object. */
+interface OOM {
+    /** Event type.    */ type: 'oom';
+    /** Event details. */ info: OOM.Info;
+}
+
 namespace Resize {
     /** The resize details object. */
     export interface Info {
@@ -52,6 +58,15 @@ namespace Resize {
         /** New memory size in bytes. */ readonly newSize: number;
         /** Active memory object.     */ readonly memory: WebAssembly.Memory;
         /** Active buffer object.     */ readonly buffer: ArrayBuffer;
+    }
+}
+
+namespace OOM {
+    /** The OOM details object. */
+    export interface Info {
+        /** Current capacity in 64 KiB pages.   */ readonly currentCapacity: number;
+        /** Requested capacity in 64 KiB pages. */ readonly requestCapacity: number;
+        /** Maximum capacity in 64 KiB pages.   */ readonly maximumCapacity: number;
     }
 }
 
@@ -366,7 +381,7 @@ const unlink = (self: Zone): void => {
 };
 
 /**
- * Compute the full zone length in 16-byte blocks.
+ * Compute the full zone length in 16-byte atoms.
  *
  * @param self The target zone.
  */ // prettier-ignore
@@ -420,7 +435,7 @@ const alloc = (size: number, token?: WeakKey): number => {
     var free: null | Zone = null;
     var used: null | Zone = null;
 
-    var info: null | Resize.Info = null;
+    if (!size) throw RangeError('Cannot allocate 0 bytes');
 
     // ↓ 1. Align and shift the size:
     size = (size + (-size & $.Align16) | 0) >>> 4 | 0;
@@ -458,65 +473,105 @@ const alloc = (size: number, token?: WeakKey): number => {
     //   -------------------
 
     else {
-        // ↓ a) The last zone is free:
-        if (last.f) {
+        // ↓ 1. Calculate the number of pages to grow the memory by:
+        temp = size - (/*#__NOINLINE__*/ tailAtoms() | 0) | 0;
+        temp = temp + (-temp & $.Align64K) >>> 12         | 0;
 
-            try {
-                temp = size - (measure(last) | 0) | 0;               // ← 1. Compute the number of 16-byte blocks to grow the memory by.
-                del(last);                                           // ← 2. Temporarily delete the last zone from the tree.
-                memory.grow(temp + (-temp & $.Align64K) >>> 12) | 0; // ← 3. Actually grow the memory.
-            } catch (error) {
-                throw error;
-            } finally {
-                add(last); // ← 4. Add the last zone back to the tree.
-            }
-        }
+        // ↓ 2. Actually grow the memory and handle OOM:
+        if (/*#__NOINLINE__*/ grow(temp) | 0) throw RangeError(`Cannot allocate ${size << 4 >>> 0} bytes`);
 
-        // ↓ b) The last zone is used:
-        else {
-            memory.grow(size + (-size & $.Align64K) >>> 12) | 0; // ← 1. Grow the memory.
-            Free(cap, last, null);                               // ← 2. Create and link new free zone.
-        }
-
-        // ↓ 3. Finally:
-        //   -----------
-
-        // ↓ 1. Refresh the internal state:
-        temp = cap;                 // ← 1. Capture the current memory size.
-        /*#__NOINLINE__*/ rebind(); // ← 2. Update bindings after resize.
-
-        // ↓ 2. Create the event payload object:
-        info = Object.freeze({
-            oldSize: +bytes(temp),  // ← 1. The old memory size.
-            newSize: +bytes(cap),   // ← 2. Pass the new memory size.
-            memory,                 // ← 3. Pass the current memory.
-            buffer,                 // ← 4. Pass the new buffer.
-        });
-
-        // ↓ 3. Trigger events:
-        emit('grow',   info);       // ← 1. Trigger the `grow` event.
-        emit('resize', info);       // ← 2. Trigger the `resize` event.
-
-        // ↓ 4. Finish the procedure:
+        // ↓ 3. Finish the procedure:
         free = last;
     }
 
     // ↓ 4. Actually allocate:
     //   ---------------------
-
-    // ↓ Lifetime token is specified:
     if (token) {
-        del(free);                             // ← 1. Delete the free zone from the search tree.
-        used = Zone(0, free.a, free.p, free);  // ← 2. Create a used zone.
-        free.a = (free.a | 0) + size | 0;      // ← 3. Shift the free zone.
-        if (measure(free) | 0)   add(free);    // ← 4. If the free node is still non-empty, add it back to the tree.
-        else                     unlink(free); // ← 5. If it’s now too small, remove it from the list.
+        del(free);                            // ← 1. Delete the free zone from the search tree.
+        used = Zone(0, free.a, free.p, free); // ← 2. Create a used zone.
+        free.a = (free.a | 0) + size | 0;     // ← 3. Shift the free zone.
+        if (measure(free) | 0) add(free);     // ← 4. If the free node is still non-empty, add it back to the tree.
+        else                unlink(free);     // ← 5. If it’s now too small, remove it from the list.
 
-        preg.register(token, used);            // ← 6. Register the finalizer.
-        allocd = allocd + size | 0;            // ← 7. Track memory usage:
+        preg.register(token, used);           // ← 6. Register the finalizer.
+        allocd = allocd + size | 0;           // ← 7. Track memory usage:
     }
 
     return free.a << 4 | 0;
+};
+
+/**
+ * Grow the memory by {@linkcode diff} 64 KiB pages and return `0` on success or
+ * `1` on OOM. If {@linkcode diff} is zero or negative, does nothing.
+ *
+ * @param diff Number of 64 KiB pages to grow the memory by.
+ */ // prettier-ignore
+const grow = (diff: number): bool => {
+    diff = diff | 0;
+
+    /** Old size in 16-byte atoms. */ var old = 0;
+    /** Current size in pages.     */ var cur = 0;
+    /** Updated size in pages.     */ var upd = 0;
+
+    // ↓ 1. Calculate sizes:
+    old = cap;
+    cur = old >>> 12 | 0;
+    upd = cur + diff | 0;
+
+    // ↓ a) Nothing to do:
+    if (upd >>> 0 <= cur >>> 0) return 0;
+
+    // ↓ b) Controlled OOM:
+    if (upd >>> 0 > 0x10000) {
+        emit_oom(cur, upd); // ← 1. Trigger OOM.
+        return 1;           // ← 2. Return the error status.
+    }
+
+    // ↓ 4. Actually grow:
+    try {
+        // ↓ a) The last zone is free:
+        if (last.f) {
+            try {
+                del(last);               // ← 1. Temporariliy delete it from the tree.
+                memory.grow(diff >>> 0); // ← 2. Grow the memory.
+                rebind();                // ← 3. Update the buffer and capacity.
+            } finally {
+                add(last);               // ← 4. Add the zone back to the tree.
+            }
+        }
+
+        // ↓ b) The last zone is used:
+        else {
+            try {
+                memory.grow(diff >>> 0); // ← 1. Grow the memory.
+                rebind();                // ← 2. Update the buffer and capacity.
+                Free(old, last, null);   // ← 3. Insert new free zone.
+            } finally {}
+        }
+    }
+
+    // ↓ 5. Handle an error if any:
+    catch (error) {
+        // ↓ a) An error occurred, but the buffer has changed:
+        if (((buffer !== memory.buffer) as any) | ((+buffer.byteLength != +/*#__NOINLINE__*/totalBytes()) as any)) {
+            rebind();                 // ← 1. Update the buffer and capacity.
+            emit_resize('grow', old); // ← 2. Trigger the `grow` event.
+        }
+
+        // ↓ b) OOM error:
+        if (error instanceof RangeError) {
+            emit_oom(cur, upd);       // ← 1. Trigger OOM.
+            return 1;                 // ← 2. Return the error status.
+        }
+
+        // ↓ c) Unknown error:
+        else throw error;
+    }
+
+    // ↓ 6. Trigger the `grow` event:
+    emit_resize('grow', old);
+
+    return 0;
 };
 
 /**
@@ -534,7 +589,6 @@ const trim = (): void => {
     /** Old size.              */ var temp                     = 0;
     /** Current memory data.   */ var old:  null | Int32Array  = null;
     /** Memory shrink handler. */ var app:  null | Func<void>  = null;
-    /** Event payload.         */ var info: null | Resize.Info = null;
 
     // ↓ 1. Calculate the memory amount to release:
     //   ------------------------------------------
@@ -548,6 +602,9 @@ const trim = (): void => {
     // ↓ 2. Respawn and migrate the memory:
     //   ----------------------------------
 
+    // TODO: Handle OOM.
+    // TODO: Re-index or delete the zone.
+
     old = new Int32Array(buffer, 0, size << 2 >>> 0); // ← 1. Capture the current data.
     memory = Memory(size >>> 12);                     // ← 2. Spawn new memory.
     /*#__NOINLINE__*/ rebind();                       // ← 3. Update bindings after resize.
@@ -556,20 +613,8 @@ const trim = (): void => {
     // ↓ 3. Notify listeners:
     //   --------------------
 
-    // ↓ 1. Respawn WASM modules:
-    for (app of apps) app();
-
-    // ↓ 2. Create the event payload object:
-    info = Object.freeze({
-        oldSize: +bytes(temp), // ← 1. The old memory size.
-        newSize: +bytes(cap),  // ← 2. Pass the new memory size.
-        memory,                // ← 3. Pass the current memory.
-        buffer,                // ← 4. Pass the new buffer.
-    });
-
-    // ↓ 3. Trigger events:
-    emit('trim',   info);      // ← 1. Trigger the `trim` event.
-    emit('resize', info);      // ← 2. Trigger the `resize` event.
+    for (app of apps) app();   // ← 1. Respawn WASM modules.
+    emit_resize('trim', temp); // ← 2. Trigger the `trim` event.
 };
 
 /**
@@ -627,31 +672,21 @@ const preg = /*#__PURE__*/ new FinalizationRegistry<Zone>(zone => {
 
 // #region Usage stats
 /**
- * Convert 16-byte blocks count to bytes.
+ * Convert 16-byte atoms count to bytes.
  */
 const bytes = (x: number) => {
     x = x | 0;
     return +(+(x >>> 0) * 16.0);
 };
 
-/**
- * Get the total memory size.
- */ // prettier-ignore
-const total = (): number => {
-    return +bytes(cap);
-};
+/** Get the memory capacity in 16-byte atoms. */
+const totalAtoms = (): number => cap | 0;
 
-/**
- * Get the total allocated memory amount.
- */ // prettier-ignore
-const used = (): number => {
-    return +bytes(allocd);
-};
+/** Get the number of allocated 16-byte atoms. */
+const usedAtoms = (): number => allocd | 0;
 
-/**
- * Get the total used memory span size including free gaps between allocated chunks.
- */ // prettier-ignore
-const usedRun = (): number => {
+/** Get the used span size in 16-byte atoms, including free gaps between allocated chunks. */ // prettier-ignore
+const runAtoms = (): number => {
     var z = 0;
 
     z = cap;
@@ -659,38 +694,26 @@ const usedRun = (): number => {
     if (head.f)                            z = z - (measure(head) | 0) | 0;
     if (last.f & ((head !== last) as any)) z = z - (measure(last) | 0) | 0;
 
-    return +bytes(z);
+    return z | 0;
 };
 
-/**
- * Get the total free memory amount.
- */ // prettier-ignore
-const free = (): number => {
-    return +bytes(cap - allocd | 0);
+/** Get the number of free 16-byte atoms. */ // prettier-ignore
+const freeAtoms = (): number => cap - allocd | 0;
+
+/** Get the number free 16-byte atoms in the beginning of memory. Calculated independently of {@linkcode tailAtoms}. */ // prettier-ignore
+const headAtoms = (): number => {
+    if (head.f) return measure(head) | 0;
+    else        return 0;
 };
 
-/**
- * Get the amount of free memory in the beginning of memory. Calculated
- * independently of {@linkcode tailFree}.
- */ // prettier-ignore
-const headFree = (): number => {
-    if (head.f) return +bytes(measure(head) | 0);
-    else        return +0.0;
+/** Get the number free 16-byte atoms in the end of memory. Calculated independently of {@linkcode headAtoms}. */ // prettier-ignore
+const tailAtoms = (): number => {
+    if (last.f) return measure(last) | 0;
+    else        return 0;
 };
 
-/**
- * Get the amount of free memory in the end of memory. Calculated independently
- * of {@linkcode headFree}.
- */ // prettier-ignore
-const tailFree = (): number => {
-    if (last.f) return +bytes(measure(last) | 0);
-    else        return +0.0;
-};
-
-/**
- * Get the largest free chunk size.
- */ // prettier-ignore
-const largestFree = (): number => {
+/** Get the largest free chunk size in 16-byte atoms. */ // prettier-ignore
+const largestAtoms = (): number => {
     var node: null | Node = null;
     var last: null | Node = null;
 
@@ -701,9 +724,30 @@ const largestFree = (): number => {
         node = node.r;
     }
 
-    if (last) return +bytes(measure(last.z) | 0);
-    else      return +0.0;
+    if (last) return measure(last.z) | 0;
+    else      return 0;
 };
+
+/** Get the memory capacity in bytes. */
+const totalBytes = (): number => +bytes(cap);
+
+/** Get the number of allocated bytes. */
+const usedBytes = (): number => +bytes(allocd);
+
+/** Get the used span size in bytes, including free gaps between allocated chunks. */
+const runBytes = (): number => +bytes(runAtoms() | 0);
+
+/** Get the number of free bytes. */ // prettier-ignore
+const freeBytes = (): number => +bytes(cap - allocd | 0);
+
+/** Get the number free bytes in the beginning of memory. Calculated independently of {@linkcode tailBytes}. */
+const headBytes = (): number => +bytes(headAtoms() | 0);
+
+/** Get the number free bytes in the end of memory. Calculated independently of {@linkcode headBytes}. */
+const tailBytes = (): number => +bytes(tailAtoms() | 0);
+
+/** Get the largest free chunk size in bytes. */
+const largestBytes = (): number => +bytes(largestAtoms() | 0);
 // #endregion Usage stats
 
 // #region Testing helpers
@@ -785,6 +829,17 @@ const on: {
      * @param fn    The handler function.
      */
     (type: 'trim', token: WeakKey, fn: (_: Trim) => any): void;
+
+    /**
+     * Register a `'oom'` event handler. The handler is automatically
+     * unregistered when the host garbage-collects its {@linkcode token}. Each
+     * handler can be registered once per token.
+     *
+     * @param type  The event type.
+     * @param token The handler’s lifetime token.
+     * @param fn    The handler function.
+     */
+    (type: 'oom', token: WeakKey, fn: (_: OOM) => any): void;
 } = (type: string, token: WeakKey, fn: (_: any) => any) => {
     hub[type]?.on(token, fn);
 };
@@ -827,42 +882,58 @@ const off: {
      * @param fn    The handler function.
      */
     (type: 'trim', token: WeakKey, fn?: (_: Trim) => any): void;
+
+    /**
+     * Explicitly unregister a `'oom'` handler. If no handler specified, all
+     * handlers of the given {@linkcode token} are removed.
+     *
+     * @param type  The event type.
+     * @param token The handler’s lifetime token.
+     * @param fn    The handler function.
+     */
+    (type: 'oom', token: WeakKey, fn?: (_: OOM) => any): void;
 } = (type: string, token: WeakKey, fn?: (_: any) => any) => {
     hub[type]?.off(token, fn);
 };
 
 /**
- * Trigger an event.
+ * Trigger an `'oom'` event.
  *
- * @param type The event type to trigger.
- * @param info The event payload.
+ * @param cur Current capacity in 64 KiB pages.
+ * @param req Requested capacity in 64 KiB pages.
  */
-const emit: {
-    /**
-     * Trigger a `'resize'` event.
-     *
-     * @param type The event type.
-     * @param info The event payload.
-     */
-    (type: 'resize', info: Resize.Info): void;
+const emit_oom = (cur: number, req: number) => {
+    cur = cur | 0;
+    req = req | 0;
 
-    /**
-     * Trigger a `'grow'` event.
-     *
-     * @param type The event type.
-     * @param info The event payload.
-     */
-    (type: 'grow', info: Resize.Info): void;
+    hub['oom']!.run({
+        type: 'oom',
+        info: Object.freeze({
+            currentCapacity: cur,
+            requestCapacity: req,
+            maximumCapacity: 0x10000,
+        } satisfies OOM.Info),
+    });
+};
 
-    /**
-     * Trigger a `'oom'` event.
-     *
-     * @param type The event type.
-     * @param info The event payload.
-     */
-    (type: 'trim', info: Resize.Info): void;
-} = (type: string, info: any): void => {
-    hub[type]?.run({ type, info } as any);
+/**
+ * Trigger `'grow'` or `'trim'`, then `'resize'`.
+ *
+ * @param type The event type.
+ * @param old  Old memory size in 16-byte words.
+ */
+const emit_resize = (type: 'grow' | 'trim', old: number) => {
+    old = old | 0;
+
+    var info: Resize.Info = Object.freeze({
+        oldSize: +bytes(old),
+        newSize: +bytes(cap),
+        memory,
+        buffer,
+    });
+
+    hub[type]!.run({ type, info });
+    hub['resize']!.run({ type: 'resize', info });
 };
 
 /** Event channels table. */
@@ -870,6 +941,7 @@ const hub: Record<string, Hub<any>> = {
     resize: /* */ /*#__PURE__*/ new Hub<Resize>(),
     grow: /*   */ /*#__PURE__*/ new Hub<Grow>(),
     trim: /*   */ /*#__PURE__*/ new Hub<Trim>(),
+    oom: /*    */ /*#__PURE__*/ new Hub<OOM>(),
 };
 
 /** Memory shrink handlers. */ var apps: Set<Func<void>> = /*#__PURE__*/ new Set();
@@ -881,8 +953,8 @@ const hub: Record<string, Hub<any>> = {
 // #endregion The memory etc.
 
 // #region Usage stats
-/** Total memory size, in 16-byte blocks. */ var cap: /*    */ number = 0x1000;
-/** Total used memory, in 16-byte blocks. */ var allocd: /* */ number = 0;
+/** Total memory size, in 16-byte atoms. */ var cap: /*    */ number = 0x1000;
+/** Total used memory, in 16-byte atoms. */ var allocd: /* */ number = 0;
 // #endregion Usage stats
 
 // #region Data structures
@@ -892,13 +964,28 @@ const hub: Record<string, Hub<any>> = {
 // #endregion Data structures
 
 // Primary API:
-export { alloc, trim, bind, memory, buffer };
+export { bool, alloc, grow, trim, bind, memory, buffer };
 
 // Stats API:
-export { total, used, usedRun, free, headFree, tailFree, largestFree };
+export {
+    totalAtoms,
+    usedAtoms,
+    runAtoms,
+    freeAtoms,
+    headAtoms,
+    tailAtoms,
+    largestAtoms,
+    totalBytes,
+    usedBytes,
+    runBytes,
+    freeBytes,
+    headBytes,
+    tailBytes,
+    largestBytes,
+};
 
 // Events API:
-export { Resize, Grow, Trim, on, off };
+export { Resize, Grow, Trim, OOM, on, off };
 
 // Private API:
-export { bool, Node, Zone, Free, add, del, unlink, measure, lt, reset, apps, head, last, root };
+export { Node, Zone, Free, add, del, unlink, measure, lt, reset, apps, head, last, root };
